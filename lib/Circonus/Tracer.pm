@@ -109,7 +109,12 @@ our @EXPORT_OK = qw/
     add_trace_cleaner
 /;
 
-my $service_name;
+# This may get reset to $ENV{CIRCONUS_TRACER_SERVICE_NAME} in
+# mungo_start_trace().
+my $service_name = $ENV{MOD_PERL} && $ENV{MOD_PERL} =~ m!^mod_perl/!
+    ? 'mod_perl'
+    : 'perl';
+
 my $trace_id;
 my $logger_pid;
 my $logger;
@@ -213,13 +218,8 @@ sub my_ip {
 
 BEGIN {
     $logger_pid = 0;
-    if($ENV{CIRCONUS_TRACER}) {
-        $service_name = 'perl';
 
-        if($ENV{'MOD_PERL'} && $ENV{'MOD_PERL'} =~ /^mod_perl\//) {
-            $service_name = 'mod_perl';
-        }
-
+    if ($ENV{CIRCONUS_TRACER}) {
         my $n_trace_id = '';
         $n_trace_id = $ENV{'B3_TRACEID'} if($ENV{'B3_TRACEID'});
         my $n_parent_span_id = $ENV{'B3_PARENTSPANID'} || '';
@@ -269,11 +269,6 @@ END {
         eval "Logger::Fq::drain(2);";
         sleep(1) unless($@);
     }
-}
-
-sub service_name {
-    $service_name = shift if(@_);
-    return $service_name;
 }
 
 sub line_number {
@@ -676,7 +671,9 @@ sub mungo_start_trace() {
 
     my $name = $r->uri();
     my $htid = $r->headers_in->{'x-b3-traceid'};
-    $service_name = $ENV{'CIRCONUS_TRACER_SERVICE_NAME'} || 'mod_perl';
+
+    $service_name = $ENV{CIRCONUS_TRACER_SERVICE_NAME} || 'mod_perl';
+
     if(defined($htid) && $htid =~ TRACE_RE) {
         new_trace($name, $htid,
                   $r->headers_in->{'x-b3-parentspanid'},
