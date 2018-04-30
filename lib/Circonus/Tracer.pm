@@ -109,7 +109,6 @@ our @EXPORT_OK = qw/
     add_trace_cleaner
 /;
 
-my $my_port;
 my $service_name;
 my $trace_id;
 my $logger_pid;
@@ -193,9 +192,10 @@ sub new_trace {
 
     sub default_endpoint {
         $ipint ||= unpack 'N', pack 'C4', split /\./, my_ip();
+
         return bless {
             ipv4 => $ipint,
-            port => $my_port || 0,
+            port => $ENV{SERVER_PORT} || 0,
             service_name => $service_name,
         }, 'Zipkin::Endpoint';
     }
@@ -219,7 +219,7 @@ BEGIN {
         if($ENV{'MOD_PERL'} && $ENV{'MOD_PERL'} =~ /^mod_perl\//) {
             $service_name = 'mod_perl';
         }
-        $my_port = $ENV{'SERVER_PORT'} if exists($ENV{'SERVER_PORT'});
+
         my $n_trace_id = '';
         $n_trace_id = $ENV{'B3_TRACEID'} if($ENV{'B3_TRACEID'});
         my $n_parent_span_id = $ENV{'B3_PARENTSPANID'} || '';
@@ -674,7 +674,6 @@ sub mungo_start_trace() {
     return undef if($tid);
     my $r = $args->[0];
 
-    $my_port = $ENV{'SERVER_PORT'} if exists($ENV{'SERVER_PORT'});
     my $name = $r->uri();
     my $htid = $r->headers_in->{'x-b3-traceid'};
     $service_name = $ENV{'CIRCONUS_TRACER_SERVICE_NAME'} || 'mod_perl';
