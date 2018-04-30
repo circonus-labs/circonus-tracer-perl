@@ -11,25 +11,30 @@ use Socket qw/PF_INET SOCK_DGRAM pack_sockaddr_in inet_aton sockaddr_in inet_nto
 use Time::HiRes qw/gettimeofday tv_interval/;
 use URI;
 
-eval "use Logger::Fq;";
-if($@) {
-    print STDERR "Circonus::Tracer requested, but Logger::Fq missing\n";
-    $ENV{CIRCONUS_TRACER} = 0;
-}
+# Turn off CIRCONUS_TRACER if required modules can't be loaded.  This
+# has to be done in a BEGIN block since CIRCONUS_TRACER is tested in
+# another BEGIN block later.
+BEGIN {
+    eval 'use Logger::Fq';
+    if ($@) {
+        warn "Circonus::Tracer requested, but Logger::Fq missing\n";
+        $ENV{CIRCONUS_TRACER} = 0;
+    }
 
-# The thrift support
-eval q{
-use Thrift;
-use Thrift::Socket;
-use Thrift::BinaryProtocol;
-use Thrift::BufferedTransport;
-use Thrift::MemoryBuffer;
-use Zipkin::Types;
-};
+    # The thrift support
+    eval q/
+        use Thrift;
+        use Thrift::Socket;
+        use Thrift::BinaryProtocol;
+        use Thrift::BufferedTransport;
+        use Thrift::MemoryBuffer;
+        use Zipkin::Types;
+    /;
 
-if($@) {
-    $ENV{CIRCONUS_TRACER} = 0;
-    print STDERR "Disabling Circonus::Tracer: $@\n"
+    if ($@) {
+        warn "Disabling Circonus::Tracer: $@\n";
+        $ENV{CIRCONUS_TRACER} = 0;
+    }
 }
 
 # This is somewhat evil... We're going
