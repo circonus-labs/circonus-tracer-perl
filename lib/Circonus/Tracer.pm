@@ -116,14 +116,15 @@ my $service_name = $ENV{MOD_PERL} && $ENV{MOD_PERL} =~ m!^mod_perl/!
     : 'perl';
 
 my $trace_id;
-my $logger_pid;
-my $logger;
 my @live_span;
 my @span_ids;
+
+my $logger_pid;
+my $logger;
 my @cleanup_tasks;
 my $IMPLICIT_TRACE;
 
-use constant TRACE_RE => qr/^(?:[1-9]\d*|0x[0-9a-zA-Z]{1,16})$/;
+my $TRACE_RE => qr/^(?:[1-9]\d*|0x[0-9a-zA-Z]{1,16})$/;
 
 sub uint64 {
     return Math::BigInt->new(shift)->bstr();
@@ -165,27 +166,23 @@ sub mkann {
 }
 
 sub new_trace {
-    my $n_span_id;
     my $name = shift || suggest_name();
-    @span_ids = ();
+
+    $trace_id = @_ ? uint64(shift) : new_trace_id();
+
     @live_span = ();
-    if(@_) {
-        $trace_id = uint64(shift);
-    } else {
-        $trace_id = new_trace_id();
-    }
-    my @spans = grep { $_ =~ TRACE_RE } @_;
-    if(@spans) {
-        push @span_ids, @spans;
-    } else {
-        push @span_ids, $trace_id;
-    }
+
+    @span_ids = grep /$TRACE_RE/, @_;
+    @span_ids = $trace_id unless @span_ids;
+
     my $now = ts_to_us();
-    @span_ids = map {
-      bless { id => uint64($_),
-              trace_id => $trace_id,
-              timestamp => $now }, 'Zipkin::Span',
-    } @span_ids;
+
+    $_ = bless {
+        id        => uint64($_),
+        trace_id  => $trace_id,
+        timestamp => $now,
+    }, 'Zipkin::Span' for @span_ids;
+
     $span_ids[0]->{host} = default_endpoint();
     $span_ids[0]->{name} = $name;
     $span_ids[0]->{annotations} = [ mkann('sr', undef, $now) ];
@@ -229,7 +226,7 @@ BEGIN {
             $n_trace_id ||= new_trace_id();
         }
     
-        if($n_trace_id =~ TRACE_RE) {
+        if ($n_trace_id =~ $TRACE_RE) {
             new_trace(undef, $n_trace_id, $n_parent_span_id, $n_span_id);
         }
     }
@@ -237,37 +234,43 @@ BEGIN {
 
 sub finish_trace {
     my $span = shift @span_ids;
-    if(exists($span->{name})) {
+
+    if (exists($span->{name})) {
         push @{$span->{annotations}}, mkann("ss", undef, undef);
         publish_span($span);
     }
+
     $trace_id = undef;
     @live_span = ();
     @span_ids = ();
-    foreach my $task (@cleanup_tasks) { $task->(); }
+
+    $_->() for @cleanup_tasks;
 }
 
 sub live_span {
-    return scalar(@live_span) ? $live_span[0] : undef;
+    return $live_span[0];
 }
 
 sub setenv {
     delete $ENV{B3_TRACEID};
     delete $ENV{B3_SPANID};
     delete $ENV{B3_PARENTSPANID};
-    if(@live_span) {
-        $ENV{B3_TRACEID} = $live_span[0]->{trace_id};
-        $ENV{B3_SPANID} = $live_span[0]->{id};
-        $ENV{B3_PARENTSPANID} = $live_span[0]->{parent_id}
-            if(exists($live_span[0]->{parent_id}));
+
+    if (my $span = $live_span[0]) {
+        $ENV{B3_TRACEID} = $span->{trace_id};
+        $ENV{B3_SPANID} = $span->{id};
+        $ENV{B3_PARENTSPANID} = $span->{parent_id}
+            if exists $span->{parent_id};
     }
 }
 
 END {
-    if($ENV{CIRCONUS_TRACER} && $IMPLICIT_TRACE && @span_ids) {
+    if ($ENV{CIRCONUS_TRACER} && $IMPLICIT_TRACE && @span_ids) {
         finish_trace();
-        eval "Logger::Fq::drain(2);";
-        sleep(1) unless($@);
+        eval {
+            Logger::Fq::drain(2);
+            sleep(1);
+        };
     }
 }
 
@@ -670,11 +673,11 @@ sub mungo_start_trace() {
     my $r = $args->[0];
 
     my $name = $r->uri();
-    my $htid = $r->headers_in->{'x-b3-traceid'};
+    my $htid = $r->headers_in->{'x-b3-traceid'} || '';
 
     $service_name = $ENV{CIRCONUS_TRACER_SERVICE_NAME} || 'mod_perl';
 
-    if(defined($htid) && $htid =~ TRACE_RE) {
+    if ($htid =~ $TRACE_RE) {
         new_trace($name, $htid,
                   $r->headers_in->{'x-b3-parentspanid'},
                   $r->headers_in->{'x-b3-spanid'});
