@@ -5,13 +5,11 @@ use warnings;
 
 # Generic includes
 use Carp;
-use Time::HiRes qw(gettimeofday tv_interval);
-use Socket qw(PF_INET SOCK_DGRAM pack_sockaddr_in inet_aton sockaddr_in inet_ntoa);
-use JSON;
-use URI;
-use MIME::Base64 qw/encode_base64/;
-use Math::BigInt;
 use Data::Dumper;
+use Math::BigInt;
+use Socket qw/PF_INET SOCK_DGRAM pack_sockaddr_in inet_aton sockaddr_in inet_ntoa/;
+use Time::HiRes qw/gettimeofday tv_interval/;
+use URI;
 
 eval "use Logger::Fq;";
 if($@) {
