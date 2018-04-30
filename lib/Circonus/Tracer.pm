@@ -100,8 +100,26 @@ Add an annotation (Zipkin BinaryAnnotation) to the current span.
 
 =cut
 
-use vars qw/$my_ip $my_port $service_name $trace_id $logger_pid $logger @live_span @span_ids
-            @cleanup_tasks $IMPLICIT_TRACE @EXPORT_OK/;
+our @EXPORT_OK = qw/
+    annotate
+    new_trace
+    finish_trace
+    live_span
+    tracer_wrap
+    add_trace_cleaner
+/;
+
+my $my_ip;
+my $my_port;
+my $service_name;
+my $trace_id;
+my $logger_pid;
+my $logger;
+my @live_span;
+my @span_ids;
+my @cleanup_tasks;
+my $IMPLICIT_TRACE;
+
 use constant TRACE_RE => qr/^(?:[1-9]\d*|0x[0-9a-zA-Z]{1,16})$/;
 
 sub uint64 {
@@ -698,13 +716,6 @@ sub annotate($$;$$) {
                 ( coerce_bin_annotation($o) );
     }
 }
-
-push @EXPORT_OK, "annotate";
-push @EXPORT_OK, "new_trace";
-push @EXPORT_OK, "finish_trace";
-push @EXPORT_OK, "live_span";
-push @EXPORT_OK, "tracer_wrap";
-push @EXPORT_OK, "add_trace_cleaner";
 
 # return true
 
