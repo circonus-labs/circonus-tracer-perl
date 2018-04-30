@@ -109,7 +109,6 @@ our @EXPORT_OK = qw/
     add_trace_cleaner
 /;
 
-my $my_ip;
 my $my_port;
 my $service_name;
 my $trace_id;
@@ -188,26 +187,35 @@ sub new_trace {
     $span_ids[0]->{annotations} = [ mkann('sr', undef, $now) ];
 }
 
-sub default_endpoint {
-    my $ipint = unpack 'N', pack 'C4', split '\.', $my_ip;
-    return bless {
-        ipv4 => $ipint,
-        port => $my_port || 0,
-        service_name => $service_name,
-    }, 'Zipkin::Endpoint';
+{
+    # Cache IP address.
+    my $ipint;
+
+    sub default_endpoint {
+        $ipint ||= unpack 'N', pack 'C4', split /\./, my_ip();
+        return bless {
+            ipv4 => $ipint,
+            port => $my_port || 0,
+            service_name => $service_name,
+        }, 'Zipkin::Endpoint';
+    }
+}
+
+# Get IP address.
+sub my_ip {
+    my $tgt_ip = "8.8.8.8";
+    socket(my $s, PF_INET, SOCK_DGRAM, 17); # 17 -> UDP
+    connect($s, pack_sockaddr_in(53, inet_aton($tgt_ip)));
+    my $mysockaddr = getsockname($s);
+    my ($port, $myaddr) = sockaddr_in($mysockaddr);
+    return inet_ntoa($myaddr);
 }
 
 BEGIN {
     $logger_pid = 0;
     if($ENV{CIRCONUS_TRACER}) {
         $service_name = 'perl';
-        # Get out IP Address
-        my $tgt_ip = "8.8.8.8";
-        socket(my $s, PF_INET, SOCK_DGRAM, 17); # 17 -> UDP
-        connect($s, pack_sockaddr_in(53, inet_aton($tgt_ip)));
-        my $mysockaddr = getsockname($s);
-        my ($port, $myaddr) = sockaddr_in($mysockaddr);
-        $my_ip = inet_ntoa($myaddr);
+
         if($ENV{'MOD_PERL'} && $ENV{'MOD_PERL'} =~ /^mod_perl\//) {
             $service_name = 'mod_perl';
         }
