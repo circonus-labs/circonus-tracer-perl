@@ -127,14 +127,10 @@ sub new_trace_id {
     );
 }
 
+
 sub ts_to_us {
-    my $ts = shift;
-    if(!$ts) {
-        $ts = [gettimeofday];
-    }
-    if(ref($ts) eq 'ARRAY') {
-        $ts = $ts->[0] * 1000000 + $ts->[1];
-    }
+    my $ts = shift || [gettimeofday];
+    $ts = $ts->[0] * 1_000_000 + $ts->[1] if ref $ts;
     return $ts;
 }
 
@@ -143,18 +139,18 @@ sub suggest_name {
 }
 
 sub mkann {
-    my $type = shift;
-    my $duration = shift;
-    my $ts = shift;
-    my $endpoint = shift;
-    $ts = ts_to_us($ts);
+    my ($type, $duration, $ts, $endpoint) = @_;
+
     my $ann = {
-        value => $type,
-        timestamp => 0 + $ts,
+        value     => $type,
+        timestamp => 0 + ts_to_us($ts),
     };
-    $ann->{duration} = $duration if(defined($duration));
-    $ann->{host} = bless $endpoint, 'Zipkin::EndPoint' if(defined($endpoint));
-    $ann->{host} ||= default_endpoint();
+
+    $ann->{duration} = $duration if defined $duration;
+    $ann->{host} = defined $endpoint
+        ? bless $endpoint, 'Zipkin::EndPoint'
+        : default_endpoint();
+
     return bless $ann, 'Zipkin::Annotation';
 }
 
@@ -240,14 +236,14 @@ BEGIN {
     sub finish_trace {
         my $span = shift @span_ids;
 
-        if (exists($span->{name})) {
-            push @{$span->{annotations}}, mkann("ss", undef, undef);
+        if (exists $span->{name}) {
+            push @{$span->{annotations}}, mkann('ss');
             publish_span($span);
         }
 
-        $trace_id = undef;
+        $trace_id  = undef;
         @live_span = ();
-        @span_ids = ();
+        @span_ids  = ();
 
         $_->() for @cleanup_tasks;
     }
