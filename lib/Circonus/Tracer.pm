@@ -277,9 +277,10 @@ END {
 }
 
 sub line_number {
-    my @parts = caller(2);
-    return { key => "line", value => "$parts[1]:$parts[2]" };
+    my ($package, $file, $line) = caller(2);
+    return { key => 'line', value => "$file:$line" };
 }
+
 sub coerce_bin_annotation {
     my $bin = shift;
     return undef unless (ref($bin) eq 'HASH' && $bin->{key} && exists($bin->{value}));
