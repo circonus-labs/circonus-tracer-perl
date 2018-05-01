@@ -100,6 +100,9 @@ Add an annotation (Zipkin BinaryAnnotation) to the current span.
 
 =cut
 
+use constant IMPLICIT_TRACE => exists $ENV{SHLVL};
+use constant TRACE_RE => qr/^(?:[1-9]\d*|0x[0-9a-zA-Z]{1,16})$/;
+
 our @EXPORT_OK = qw/
     annotate
     new_trace
@@ -109,19 +112,9 @@ our @EXPORT_OK = qw/
     add_trace_cleaner
 /;
 
-# This may get reset to $ENV{CIRCONUS_TRACER_SERVICE_NAME} in
-# mungo_start_trace().
-my $service_name = $ENV{MOD_PERL} && $ENV{MOD_PERL} =~ m!^mod_perl/!
-    ? 'mod_perl'
-    : 'perl';
-
 my $trace_id;
 my @live_span;
 my @span_ids;
-
-my $IMPLICIT_TRACE;
-
-my $TRACE_RE => qr/^(?:[1-9]\d*|0x[0-9a-zA-Z]{1,16})$/;
 
 sub uint64 {
     return Math::BigInt->new(shift)->bstr();
@@ -169,7 +162,7 @@ sub new_trace {
 
     @live_span = ();
 
-    @span_ids = grep /$TRACE_RE/, @_;
+    @span_ids = grep $_ =~ TRACE_RE, @_;
     @span_ids = $trace_id unless @span_ids;
 
     my $now = ts_to_us();
@@ -186,6 +179,17 @@ sub new_trace {
 }
 
 BEGIN {
+    my $service_name = $ENV{MOD_PERL} && $ENV{MOD_PERL} =~ m!^mod_perl/!
+        ? 'mod_perl'
+        : 'perl';
+
+    sub service_name {
+        $service_name = shift if @_;
+        return $service_name;
+    }
+}
+
+BEGIN {
     # Cache IP address.
     my $ipint;
 
@@ -195,7 +199,7 @@ BEGIN {
         return bless {
             ipv4 => $ipint,
             port => $ENV{SERVER_PORT} || 0,
-            service_name => $service_name,
+            service_name => service_name(),
         }, 'Zipkin::Endpoint';
     }
 }
@@ -212,18 +216,14 @@ sub my_ip {
 
 BEGIN {
     if ($ENV{CIRCONUS_TRACER}) {
-        my $n_trace_id = '';
-        $n_trace_id = $ENV{'B3_TRACEID'} if($ENV{'B3_TRACEID'});
-        my $n_parent_span_id = $ENV{'B3_PARENTSPANID'} || '';
-        my $n_span_id = $ENV{'B3_SPANID'} || '';
-        if(exists($ENV{SHLVL})) {
-            $IMPLICIT_TRACE = 1;
-            $n_trace_id ||= new_trace_id();
-        }
+        my $trace_id       = $ENV{B3_TRACEID}      || '';
+        my $parent_span_id = $ENV{B3_PARENTSPANID} || '';
+        my $span_id        = $ENV{B3_SPANID}       || '';
+
+        $trace_id ||= new_trace_id() if IMPLICIT_TRACE;
     
-        if ($n_trace_id =~ $TRACE_RE) {
-            new_trace(undef, $n_trace_id, $n_parent_span_id, $n_span_id);
-        }
+        new_trace(undef, $trace_id, $parent_span_id, $span_id)
+            if $trace_id =~ TRACE_RE;
     }
 }
 
@@ -268,7 +268,7 @@ sub setenv {
 }
 
 END {
-    if ($ENV{CIRCONUS_TRACER} && $IMPLICIT_TRACE && @span_ids) {
+    if ($ENV{CIRCONUS_TRACER} && IMPLICIT_TRACE && @span_ids) {
         finish_trace();
         eval {
             Logger::Fq::drain(2);
@@ -681,9 +681,9 @@ sub mungo_start_trace() {
     my $name = $r->uri();
     my $htid = $r->headers_in->{'x-b3-traceid'} || '';
 
-    $service_name = $ENV{CIRCONUS_TRACER_SERVICE_NAME} || 'mod_perl';
+    service_name($ENV{CIRCONUS_TRACER_SERVICE_NAME} || 'mod_perl');
 
-    if ($htid =~ $TRACE_RE) {
+    if ($htid =~ TRACE_RE) {
         new_trace($name, $htid,
                   $r->headers_in->{'x-b3-parentspanid'},
                   $r->headers_in->{'x-b3-spanid'});
