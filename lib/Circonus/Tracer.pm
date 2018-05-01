@@ -281,37 +281,36 @@ sub line_number {
     return { key => 'line', value => "$file:$line" };
 }
 
+# Functions or methods (pop() allows both) to convert value to
+# annotation type.
+sub to_STRING { '' . pop }
+sub to_BOOL   { !!pop }
+sub to_BYTES  { pop }
+sub to_I16    { pack 'n', int pop }
+sub to_I32    { pack 'N', int pop }
+sub to_I64    { pack 'NN', map { $_ >> 32, $_ & 0xffffffff } int pop }
+sub to_DOUBLE { pack 'd>', 1.0 * pop }
+
 sub coerce_bin_annotation {
     my $bin = shift;
-    return undef unless (ref($bin) eq 'HASH' && $bin->{key} && exists($bin->{value}));
-    eval {
-        my $a = $bin->{annotation_type} || 'STRING';
-        if($a eq 'BOOL') { $bin->{annotation_type} = BOOL; $bin->{value} = !!$bin->{value}}
-        elsif($a eq 'BYTES') { $bin->{annotation_type} = BYTES; }
-        # The following appears to be a travesty that cannot be undone
-        elsif($a eq 'I16') {
-            $bin->{annotation_type} = I16;
-            $bin->{value} = pack("n", int($bin->{value}));
-        }
-        elsif($a eq 'I32') {
-            $bin->{annotation_type} = I32;
-            $bin->{value} = pack("N", int($bin->{value}));
-        }
-        elsif($a eq 'I64') {
-            $bin->{annotation_type} = I64;
-            my ($bp, $lp) = (int($bin->{value}) >> 32, int($bin->{value}) & 0xffffffff);
-            $bin->{value} = pack("NN", $bp, $lp);
-        }
-        elsif($a eq 'DOUBLE') {
-            $bin->{annotation_type} = DOUBLE;
-            $bin->{value} = pack("d>", 1.0 * $bin->{value});
-        }
-        else { $bin->{annotation_type} = STRING; }
-        if(exists($bin->{host})) {
-            $bin->{host} = bless $bin->{host}, 'Zipkin::Endpoint';
-        }
-    };
-    return undef if($@);
+    
+    return unless ref $bin eq 'HASH' && $bin->{key} && exists $bin->{value};
+
+    for my $type ($bin->{annotation_type}) {
+        # Check that type is supported.
+        $type = 'STRING' unless $type && __PACKAGE__->can("to_$type");
+
+        # Convert value to type.
+        my $to = "to_$type";
+        $_ = __PACKAGE__->$to($_) for $bin->{value};
+
+        # Set type to constant of same name.
+        $type = __PACKAGE__->$type;
+    }
+
+    $bin->{host} = bless $bin->{host}, 'Zipkin::Endpoint'
+        if exists $bin->{host};
+
     return bless $bin, 'Zipkin::BinaryAnnotation';
 }
 
@@ -409,8 +408,8 @@ sub tracer_wrap {
             foreach my $pre_run (@$pre_runs) {
                 if(ref($pre_run) eq 'CODE') {
                     push @{$span->{binary_annotations}},
-                        grep { ref($_) eq 'Zipkin::BinaryAnnotation' }
-                            map { coerce_bin_annotation($_) } $pre_run->($span, \@_);
+                        map coerce_bin_annotation($_),
+                        $pre_run->($span, \@_);
                 }
             }
             $start_time = [gettimeofday];
@@ -436,8 +435,8 @@ sub tracer_wrap {
             foreach my $post_run (@$post_runs) {
                 if(ref($post_run) eq 'CODE') {
                     push @{$span->{binary_annotations}},
-                        grep { ref($_) eq 'Zipkin::BinaryAnnotation' }
-                            map { coerce_bin_annotation($_) } $post_run->($span, \@_, \@results);
+                        map coerce_bin_annotation($_),
+                        $post_run->($span, \@_, \@results);
                 }
             }
             if($newspan && ($floatingspan || @span_ids > 1)) {
@@ -576,8 +575,8 @@ sub curlm_info_read_postamble {
     delete $curlm_handles{$curlm}->{$id};
     push @{$span->{annotations}}, mkann("cr", undef, undef);
     push @{$span->{binary_annotations}},
-        grep { ref($_) eq 'Zipkin::BinaryAnnotation' }
-            map { coerce_bin_annotation($_) } curl_post($span, [ $curl ]);
+        map coerce_bin_annotation($_),
+        curl_post($span, [ $curl ]);
     publish_span($span);
 }
 sub curl_header_fixup {
@@ -731,8 +730,7 @@ sub annotate($$;$$) {
         $o->{annotation_type} = $type if($type);
         $o->{host} = $endpoint if($endpoint);
         push @{$span_ids[0]->{binary_annotations}},
-            grep { ref($_) eq 'Zipkin::BinaryAnnotation' }
-                ( coerce_bin_annotation($o) );
+            coerce_bin_annotation($o);
     }
 }
 
