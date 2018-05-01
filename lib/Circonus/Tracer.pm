@@ -101,7 +101,7 @@ Add an annotation (Zipkin BinaryAnnotation) to the current span.
 =cut
 
 use constant IMPLICIT_TRACE => exists $ENV{SHLVL};
-use constant TRACE_RE => qr/^(?:[1-9]\d*|0x[0-9a-zA-Z]{1,16})$/;
+use constant TRACE_RE => qr/^(?:[1-9]\d*|0x[0-9a-fA-F]{1,16})$/;
 
 our @EXPORT_OK = qw/
     annotate
@@ -117,11 +117,14 @@ my @live_span;
 my @span_ids;
 
 sub uint64 {
-    return Math::BigInt->new(shift)->bstr();
+    return Math::BigInt->new(shift)->bstr;
 }
 
 sub new_trace_id {
-    return uint64("0x" . sprintf("%02x" x 8, int(rand(127)), map { int(rand(255)) } (1..7)));
+    return uint64(
+        sprintf '0x' . '%02x' x 8,
+            int(rand 128), map int(rand 256), 1..7
+    );
 }
 
 sub ts_to_us {
