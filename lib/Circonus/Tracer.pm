@@ -119,7 +119,6 @@ my $trace_id;
 my @live_span;
 my @span_ids;
 
-my @cleanup_tasks;
 my $IMPLICIT_TRACE;
 
 my $TRACE_RE => qr/^(?:[1-9]\d*|0x[0-9a-zA-Z]{1,16})$/;
@@ -228,19 +227,27 @@ BEGIN {
     }
 }
 
-sub finish_trace {
-    my $span = shift @span_ids;
+BEGIN {
+    my @cleanup_tasks;
 
-    if (exists($span->{name})) {
-        push @{$span->{annotations}}, mkann("ss", undef, undef);
-        publish_span($span);
+    sub add_trace_cleaner {
+        push @cleanup_tasks, @_;
     }
 
-    $trace_id = undef;
-    @live_span = ();
-    @span_ids = ();
+    sub finish_trace {
+        my $span = shift @span_ids;
 
-    $_->() for @cleanup_tasks;
+        if (exists($span->{name})) {
+            push @{$span->{annotations}}, mkann("ss", undef, undef);
+            publish_span($span);
+        }
+
+        $trace_id = undef;
+        @live_span = ();
+        @span_ids = ();
+
+        $_->() for @cleanup_tasks;
+    }
 }
 
 sub live_span {
@@ -541,10 +548,6 @@ that downstream HTTP services can report on the spans.
         tracer_wrap("WWW::Curl::Multi::info_read", wants_start => 0, wants_end => 0,
                     postamble => \&curlm_info_read_postamble);
     }
-}
-
-sub add_trace_cleaner {
-    push @cleanup_tasks, @_;
 }
 
 my %curl_hdr_hacks;
