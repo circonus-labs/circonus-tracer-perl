@@ -119,8 +119,6 @@ my $trace_id;
 my @live_span;
 my @span_ids;
 
-my $logger_pid;
-my $logger;
 my @cleanup_tasks;
 my $IMPLICIT_TRACE;
 
@@ -188,7 +186,7 @@ sub new_trace {
     $span_ids[0]->{annotations} = [ mkann('sr', undef, $now) ];
 }
 
-{
+BEGIN {
     # Cache IP address.
     my $ipint;
 
@@ -214,8 +212,6 @@ sub my_ip {
 }
 
 BEGIN {
-    $logger_pid = 0;
-
     if ($ENV{CIRCONUS_TRACER}) {
         my $n_trace_id = '';
         $n_trace_id = $ENV{'B3_TRACEID'} if($ENV{'B3_TRACEID'});
@@ -458,12 +454,19 @@ sub tracer_wrap {
 
 =cut
 
-sub open_logger {
-    if($ENV{CIRCONUS_TRACER}) {
-        if($logger_pid != $$) {
-            $logger = Logger::Fq->new({ exchange => "logging" });
+BEGIN {
+    my $logger_pid = 0;
+    my $logger;
+
+    sub open_logger {
+        $ENV{CIRCONUS_TRACER} or return;
+
+        if ($logger_pid != $$) {
             $logger_pid = $$;
+            $logger = Logger::Fq->new({ exchange => "logging" });
         }
+
+        return $logger;
     }
 }
 
@@ -686,27 +689,33 @@ sub mungo_start_trace() {
     }
     return undef;
 }
+
 sub mungo_end_trace() {
     finish_trace();
 }
+
 sub publish_span {
-    open_logger();
-    return unless($logger);
+    my $logger = open_logger() or return;
+
     my $span = shift;
+
     eval {
         my $mem = Thrift::MemoryBuffer->new();
         my $proto = Thrift::BinaryProtocol->new($mem);
         $span->write($proto);
         my $payload = $mem->getBuffer();
-        if(0) { # Debugging Thrift
+
+        if (0) { # Debugging Thrift
             my $oproto = Thrift::BinaryProtocol->new($mem);
             my $ospan = bless {}, 'Zipkin::Span';
             $ospan->read($oproto);
             print STDERR Dumper($ospan);
         }
+
         $logger->log("zipkin.thrift.$span->{trace_id}", $payload);
     };
-    warn($@) if $@;
+
+    warn $@ if $@;
 }
 
 sub annotate($$;$$) {
