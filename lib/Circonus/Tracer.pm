@@ -315,44 +315,44 @@ sub coerce_bin_annotation {
 }
 
 sub simple_wrap {
-    my $old_name = shift;
-    my $pre = shift || [];
+    my $name = shift;
+    my $pre  = shift || [];
     my $post = shift || [];
 
-    my $typeglob = (ref $old_name || $old_name =~ /::/)
-        ? $old_name
-        : caller()."::$old_name";
-    my $old_func;
-    {
+    my $code = $name;
+
+    unless (ref $name) {
+        $name = caller . "::$name" unless $name =~ /::/;
+
         no strict 'refs';
-        $old_func = ref $typeglob eq 'CODE' && $typeglob
-            || *$typeglob{CODE}
-            || croak "Can't wrap non-existent subroutine $typeglob";
+        $code = *$name{CODE}
+            or croak "Can't wrap non-existent subroutine $name";
     }
-    my $u_func = sub {
+
+    my $wrap = sub {
         my $wantarray = wantarray;
-        my @results;
 
-        foreach my $pre_run (@$pre) { $pre_run->(\@_); }
-        eval {
-            if ($wantarray) {
-                @results = &$old_func;
-            } else {
-                $results[0] = &$old_func;
-            }
-        };
-        foreach my $post_run (@$post) { $post_run->(\@_, \@results); }
+        $_->(\@_) for @$pre;
 
-        my $exception = $@;
-        die $exception if $exception;
-        return @results if $wantarray;
-        return $results[0];
+        my @results = eval { $wantarray ? &$code : scalar &$code };
+        my $e = $@;
+
+        $_->(\@_, \@results) for @$post;
+
+        die $e if $e;
+
+        return $wantarray ? @results : $results[0];
     };
-    no warnings 'syntax';
-    no warnings 'redefine';
-    no strict 'refs';
-    *{$typeglob} = $u_func;
+
+    unless (ref $name) {
+        no warnings 'redefine';
+        no strict 'refs';
+        *$name = $wrap;
+    }
+
+    return $wrap;
 }
+
 sub tracer_wrap {
     my $old_name = shift;
     my %args = @_;
@@ -551,13 +551,10 @@ that downstream HTTP services can report on the spans.
 
 my %curl_hdr_hacks;
 sub curl_header_hack {
-    my $args = shift;
-    my $curl = $args->[0];
-    if($args->[1] == LOCAL_CURLOPT_HTTPHEADER) {
-        my @copy = @{$args->[2]};
-        $curl_hdr_hacks{$curl} = \@copy;
-    }
+    my ($curl, $key, $value) = @{$_[0]};
+    $curl_hdr_hacks{$curl} = [@$value] if $key == LOCAL_CURLOPT_HTTPHEADER;
 }
+
 my %curlm_handles = ();
 add_trace_cleaner(sub { %curlm_handles = (); });
 sub curlm_info_read_postamble {
