@@ -112,9 +112,6 @@ our @EXPORT_OK = qw/
     add_trace_cleaner
 /;
 
-my $trace_id;
-my @span_ids;
-
 sub uint64 {
     return Math::BigInt->new(shift)->bstr;
 }
@@ -125,7 +122,6 @@ sub new_trace_id {
             int(rand 128), map int(rand 256), 1..7
     );
 }
-
 
 sub ts_to_us {
     my $ts = shift || [gettimeofday];
@@ -153,25 +149,170 @@ sub mkann {
     return bless $ann, 'Zipkin::Annotation';
 }
 
-sub new_trace {
-    my $name = shift || suggest_name();
+BEGIN {
+    my @span_ids;
 
-    $trace_id = @_ ? uint64(shift) : new_trace_id();
+    sub annotate($$;$$) {
+        my $span = $span_ids[0] or return;
 
-    @span_ids = grep $_ =~ TRACE_RE, @_;
-    @span_ids = $trace_id unless @span_ids;
+        my ($key, $value, $type, $endpoint) = @_;
 
-    my $now = ts_to_us();
+        my $bin = { key => $key, value => $value };
+        $bin->{annotation_type} = $type     if $type;
+        $bin->{host}            = $endpoint if $endpoint;
 
-    $_ = bless {
-        id        => uint64($_),
-        trace_id  => $trace_id,
-        timestamp => $now,
-    }, 'Zipkin::Span' for @span_ids;
+        push @{$span->{binary_annotations}},
+            coerce_bin_annotation($bin);
+    }
 
-    $span_ids[0]->{host} = default_endpoint();
-    $span_ids[0]->{name} = $name;
-    $span_ids[0]->{annotations} = [ mkann('sr', undef, $now) ];
+    my $trace_id;
+
+    sub new_trace {
+        my $name = shift || suggest_name();
+
+        $trace_id = @_ ? uint64(shift) : new_trace_id();
+
+        @span_ids = grep $_ =~ TRACE_RE, @_;
+        @span_ids = $trace_id unless @span_ids;
+
+        my $now = ts_to_us();
+
+        $_ = bless {
+            id        => uint64($_),
+            trace_id  => $trace_id,
+            timestamp => $now,
+        }, 'Zipkin::Span' for @span_ids;
+
+        $span_ids[0]->{host} = default_endpoint();
+        $span_ids[0]->{name} = $name;
+        $span_ids[0]->{annotations} = [ mkann('sr', undef, $now) ];
+    }
+
+    sub tracer_wrap {
+        my $func = shift;
+
+        my ($code, $name) = code_and_name($func)
+            or croak "Can't wrap non-existent subroutine $func";
+
+        my %args = @_;
+
+        my $span_name    = $args{name} || $name || "$code";
+        my $newspan      = $args{newspan};
+        my $floatingspan = $args{floatingspan};
+        my $preamble     = $args{preamble};
+        my $postamble    = $args{postamble};
+        my $pre_runs     = $args{pre_bins};
+        my $post_runs    = $args{post_bins};
+
+        ref eq 'ARRAY' or $_ = [$_] for $pre_runs, $post_runs;
+
+        my $wants_start = exists $args{wants_start} ? $args{wants_start} : 1;
+        my $wants_end   = exists $args{wants_end}   ? $args{wants_end}   : 1;
+
+        my $wrap = sub {
+            my $wantarray = wantarray;
+            my ($span, $start_time);
+
+            $span = $preamble->($trace_id, \@_) if $preamble;
+
+            if ($trace_id) {
+                unless ($span) {
+                    if ($newspan) {
+                        $span = bless {
+                            id       => new_trace_id(),
+                            trace_id => $trace_id,
+                            host     => default_endpoint(),
+                        }, 'Zipkin::Span';
+
+                        ref and $_ = $_->(@_) for $span->{name} = $span_name;
+                        $span->{parent_id} = $span_ids[0]->{id} if @span_ids;
+                        unshift @span_ids, $span unless $floatingspan;
+                    } else {
+                        $span = $span_ids[0];
+                    }
+
+                    $span->{annotations}        ||= [];
+                    $span->{binary_annotations} ||= [];
+                }
+
+                push @{$span->{binary_annotations}},
+                    map coerce_bin_annotation($_),
+                    map $_->($span, \@_),
+                    grep ref eq 'CODE',
+                    @$pre_runs;
+
+                $start_time = [gettimeofday];
+
+                push @{$span->{annotations}}, mkann('cs', undef, $start_time)
+                    if $newspan && $wants_start;
+            }
+
+            setenv($span);
+
+            my @results = eval { $wantarray ? &$code : scalar &$code };
+            my $exception = $@;
+
+            setenv();
+
+            if ($span && $trace_id) {
+                if ($newspan && $wants_end) {
+                    my $end_time = [gettimeofday];
+                    my $duration = int(
+                        1_000_000 *
+                        tv_interval($start_time, $end_time)
+                    );
+                    push @{$span->{annotations}},
+                        mkann('cr', $duration, $end_time);
+                }
+
+                push @{$span->{binary_annotations}},
+                    map coerce_bin_annotation($_),
+                    map $_->($span, \@_, \@results),
+                    grep ref eq 'CODE',
+                    @$post_runs;
+
+                if ($newspan and $floatingspan || @span_ids) {
+                    shift @span_ids unless $floatingspan;
+                    publish_span($span) if $wants_end;
+                }
+            }
+
+            $postamble->($trace_id, \@_, \@results) if $postamble;
+
+            die $exception if $exception;
+
+            return $wantarray ? @results : $results[0];
+        };
+
+        if ($name) {
+            no warnings 'syntax';
+            no warnings 'redefine';
+            no strict 'refs';
+            *$name = $wrap;
+        }
+
+        return $wrap;
+    }
+
+    my @cleanup_tasks;
+
+    sub add_trace_cleaner {
+        push @cleanup_tasks, @_;
+    }
+
+    sub finish_trace {
+        my $span  = shift @span_ids;
+
+        if (exists $span->{name}) {
+            push @{$span->{annotations}}, mkann('ss');
+            publish_span($span);
+        }
+
+        $trace_id  = undef;
+        @span_ids  = ();
+
+        $_->() for @cleanup_tasks;
+    }
 }
 
 BEGIN {
@@ -224,28 +365,6 @@ BEGIN {
 }
 
 BEGIN {
-    my @cleanup_tasks;
-
-    sub add_trace_cleaner {
-        push @cleanup_tasks, @_;
-    }
-
-    sub finish_trace {
-        my $span = shift @span_ids;
-
-        if (exists $span->{name}) {
-            push @{$span->{annotations}}, mkann('ss');
-            publish_span($span);
-        }
-
-        $trace_id  = undef;
-        @span_ids  = ();
-
-        $_->() for @cleanup_tasks;
-    }
-}
-
-BEGIN {
     my $live_span;
 
     sub live_span {
@@ -267,7 +386,7 @@ BEGIN {
 }
 
 END {
-    if ($ENV{CIRCONUS_TRACER} && IMPLICIT_TRACE && @span_ids) {
+    if ($ENV{CIRCONUS_TRACER} && IMPLICIT_TRACE) {
         finish_trace();
         eval {
             Logger::Fq::drain(2);
@@ -344,108 +463,6 @@ sub simple_wrap {
         my $exception = $@;
 
         $_->(\@_, \@results) for @$post;
-
-        die $exception if $exception;
-
-        return $wantarray ? @results : $results[0];
-    };
-
-    if ($name) {
-        no warnings 'syntax';
-        no warnings 'redefine';
-        no strict 'refs';
-        *$name = $wrap;
-    }
-
-    return $wrap;
-}
-
-sub tracer_wrap {
-    my $func = shift;
-
-    my ($code, $name) = code_and_name($func)
-        or croak "Can't wrap non-existent subroutine $func";
-
-    my %args = @_;
-
-    my $span_name    = $args{name} || $name || "$code";
-    my $newspan      = $args{newspan};
-    my $floatingspan = $args{floatingspan};
-    my $preamble     = $args{preamble};
-    my $postamble    = $args{postamble};
-    my $pre_runs     = $args{pre_bins};
-    my $post_runs    = $args{post_bins};
-
-    ref eq 'ARRAY' or $_ = [$_] for $pre_runs, $post_runs;
-
-    my $wants_start = exists $args{wants_start} ? $args{wants_start} : 1;
-    my $wants_end   = exists $args{wants_end}   ? $args{wants_end}   : 1;
-
-    my $wrap = sub {
-        my $wantarray = wantarray;
-        my ($span, $start_time);
-
-        $span = $preamble->($trace_id, \@_) if $preamble;
-
-        if ($trace_id) {
-            unless ($span) {
-                if ($newspan) {
-                    $span = bless {
-                        id       => new_trace_id(),
-                        trace_id => $trace_id,
-                        host     => default_endpoint(),
-                    }, 'Zipkin::Span';
-
-                    ref and $_ = $_->(@_) for $span->{name} = $span_name;
-                    $span->{parent_id} = $span_ids[0]->{id} if @span_ids;
-                    unshift @span_ids, $span unless $floatingspan;
-                } else {
-                    $span = $span_ids[0];
-                }
-
-                $span->{annotations}        ||= [];
-                $span->{binary_annotations} ||= [];
-            }
-
-            push @{$span->{binary_annotations}},
-                map coerce_bin_annotation($_),
-                map $_->($span, \@_),
-                grep ref eq 'CODE',
-                @$pre_runs;
-
-            $start_time = [gettimeofday];
-
-            push @{$span->{annotations}}, mkann('cs', undef, $start_time)
-                if $newspan && $wants_start;
-        }
-
-        setenv($span);
-
-        my @results = eval { $wantarray ? &$code : scalar &$code };
-        my $exception = $@;
-
-        setenv();
-   
-        if ($span && $trace_id) {
-            my $end_time = [gettimeofday];
-            my $duration = int(tv_interval($start_time, $end_time) * 1000000);
-
-            push @{$span->{annotations}}, mkann('cr', $duration, $end_time)
-                if $newspan && $wants_end;
-
-            push @{$span->{binary_annotations}},
-                map coerce_bin_annotation($_),
-                map $_->($span, \@_, \@results),
-                grep ref eq 'CODE',
-                @$post_runs;
-
-            if ($newspan and $floatingspan || @span_ids) {
-                shift @span_ids unless $floatingspan;
-                publish_span($span) if $wants_end;
-            }
-        }
-
-        $postamble->($trace_id, \@_, \@results) if $postamble;
 
         die $exception if $exception;
 
@@ -721,20 +738,6 @@ sub publish_span {
     };
 
     warn $@ if $@;
-}
-
-sub annotate($$;$$) {
-    if(@span_ids) {
-        my $key = shift;
-        my $value = shift;
-        my $type = shift;
-        my $endpoint = shift;
-        my $o = { key => $key, value => $value };
-        $o->{annotation_type} = $type if($type);
-        $o->{host} = $endpoint if($endpoint);
-        push @{$span_ids[0]->{binary_annotations}},
-            coerce_bin_annotation($o);
-    }
 }
 
 # return true
