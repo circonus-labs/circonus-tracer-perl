@@ -412,7 +412,7 @@ sub to_DOUBLE { pack 'd>', 1.0 * pop }
 
 sub coerce_bin_annotation {
     my $bin = shift;
-    
+
     return unless ref $bin eq 'HASH' && $bin->{key} && exists $bin->{value};
 
     for my $type ($bin->{annotation_type}) {
@@ -499,7 +499,7 @@ BEGIN {
     }
 }
 
-if($ENV{CIRCONUS_TRACER}) {
+if ($ENV{CIRCONUS_TRACER}) {
 
 =head2 Mungo and Mungo::Quiet
 
@@ -509,15 +509,25 @@ We add annotations: http.uri, http.hostname, http.method, http.status.
 
 =cut
 
-    eval q{use Mungo; use Mungo::Quiet;};
-    unless($@) {
-        tracer_wrap("Mungo::Quiet::handler",
-                    preamble => \&mungo_start_trace, postamble => \&mungo_end_trace,
-                    pre_bins => \&apache_pre, post_bins => \&apache_post);
-        tracer_wrap("Mungo::handler",
-                    preamble => \&mungo_start_trace, postamble => \&mungo_end_trace,
-                    pre_bins => \&apache_pre, post_bins => \&apache_post);
-    }
+    eval {
+        require Mungo;
+        require Mungo::Quiet;
+
+        tracer_wrap(
+            "Mungo::Quiet::handler",
+            preamble  => \&mungo_start_trace,
+            postamble => \&mungo_end_trace,
+            pre_bins  => \&apache_pre,
+            post_bins => \&apache_post,
+        );
+        tracer_wrap(
+            "Mungo::handler",
+            preamble  => \&mungo_start_trace,
+            postamble => \&mungo_end_trace,
+            pre_bins  => \&apache_pre,
+            post_bins => \&apache_post,
+        );
+    };
 
 =head2 DBI
 
@@ -527,15 +537,22 @@ We add annotations: sql.statement.
 
 =cut
 
-    eval q{use DBI;};
-    unless($@) {
-        tracer_wrap("DBI::st::execute", newspan => 1,
-                    name => dbi_namer("DBI::st->execute"),
-                    pre_bins => [\&line_number, \&dbi_pre] );
-        tracer_wrap("DBI::db::do", newspan => 1,
-                    name => dbi_namer("DBI::db->do"),
-                    pre_bins => [\&line_number, \&dbi_pre] );
-    }
+    eval {
+        require DBI;
+
+        tracer_wrap(
+            "DBI::st::execute",
+            newspan  => 1,
+            name     => dbi_namer("DBI::st->execute"),
+            pre_bins => [\&line_number, \&dbi_pre],
+        );
+        tracer_wrap(
+            "DBI::db::do",
+            newspan  => 1,
+            name     => dbi_namer("DBI::db->do"),
+            pre_bins => [\&line_number, \&dbi_pre],
+        );
+    };
 
 =head2 Redis::hiredis
 
@@ -543,10 +560,15 @@ We wrap the commands from Redis.
 
 =cut
 
-    eval q{use Redis::hiredis;};
-    unless($@) {
-        tracer_wrap("Redis::hiredis::command", newspan => 1, name => sub { "Redis::hiredis::$_[1]" });
-    }
+    eval {
+        require Redis::hiredis;
+
+        tracer_wrap(
+            "Redis::hiredis::command",
+            newspan => 1,
+            name    => sub { "Redis::hiredis::$_[1]" },
+        );
+    };
 
 =head2 WWW::Curl
 
@@ -560,16 +582,34 @@ that downstream HTTP services can report on the spans.
 
 =cut
 
-    eval q{use WWW::Curl::Easy; use WWW::Curl::Multi;};
-    unless($@) {
-        simple_wrap("WWW::Curl::Easy::setopt", [ \&curl_header_hack ]);
-        tracer_wrap("WWW::Curl::Easy::perform", newspan => 1, pre_bins => [\&line_number, \&curl_pre],
-                    post_bins => [\&curl_post] );
-        tracer_wrap("WWW::Curl::Multi::add_handle", newspan => 1, floatingspan => 1, wants_end => 0,
-                    pre_bins => [\&line_number,\&curlm_add_handle_pre] );
-        tracer_wrap("WWW::Curl::Multi::info_read", wants_start => 0, wants_end => 0,
-                    postamble => \&curlm_info_read_postamble);
-    }
+    eval {
+        require WWW::Curl::Easy;
+        require WWW::Curl::Multi;
+
+        simple_wrap(
+            "WWW::Curl::Easy::setopt",
+            [ \&curl_header_hack ],
+        );
+        tracer_wrap(
+            "WWW::Curl::Easy::perform",
+            newspan   => 1,
+            pre_bins  => [\&line_number, \&curl_pre],
+            post_bins => [\&curl_post],
+        );
+        tracer_wrap(
+            "WWW::Curl::Multi::add_handle",
+            newspan      => 1,
+            floatingspan => 1,
+            wants_end    => 0,
+            pre_bins     => [\&line_number, \&curlm_add_handle_pre],
+        );
+        tracer_wrap(
+            "WWW::Curl::Multi::info_read",
+            wants_start => 0,
+            wants_end   => 0,
+            postamble   => \&curlm_info_read_postamble,
+        );
+    };
 }
 
 my %curl_hdr_hacks;
@@ -578,141 +618,174 @@ sub curl_header_hack {
     $curl_hdr_hacks{$curl} = [@$value] if $key == LOCAL_CURLOPT_HTTPHEADER;
 }
 
-my %curlm_handles = ();
-add_trace_cleaner(sub { %curlm_handles = (); });
+my %curlm_handles;
+add_trace_cleaner(sub { %curlm_handles = () });
+
 sub curlm_info_read_postamble {
-    my $tid = shift;
-    my $args = shift;
+    my $tid     = shift;
+    my $args    = shift;
     my $results = shift;
-    my $curlm = $args->[0];
-    my $id = $results->[0];
-    return unless $id;
-    my $info = $curlm_handles{$curlm}->{$id};
-    return if(!$info);
-    my $curl = $info->{curl};
+    my $curlm   = $args->[0];
+    my $id      = $results->[0] or return;
+
+    my $info = $curlm_handles{$curlm}{$id} or return;
+
+    my $curl = $info->{curl} or return;
     my $span = $info->{span};
-    return unless $curl;
-    delete $curlm_handles{$curlm}->{$id};
-    push @{$span->{annotations}}, mkann("cr", undef, undef);
+
+    delete $curlm_handles{$curlm}{$id};
+
+    push @{$span->{annotations}}, mkann('cr');
+
     push @{$span->{binary_annotations}},
         map coerce_bin_annotation($_),
         curl_post($span, [ $curl ]);
+
     publish_span($span);
 }
+
 sub curl_header_fixup {
     my $curl = shift;
     my $span = shift;
-    my $hdrs = $curl_hdr_hacks{$curl} || [];
-    delete($curl_hdr_hacks{$curl});
-    my $X_trace_id = Math::BigInt->new($span->{trace_id})->as_hex();
-    my $X_span_id = Math::BigInt->new($span->{id})->as_hex();
-    push @$hdrs, "X-B3-TraceId: $X_trace_id",
-                 "X-B3-SpanId: $X_span_id";
-    if(exists($span->{parent_id})) {
-      my $X_parent_span_id = Math::BigInt->new($span->{parent_id})->as_hex();
-      push @$hdrs, "X-B3-ParentSpanId: $X_parent_span_id";
-    }
-    $curl->setopt(LOCAL_CURLOPT_HTTPHEADER, $hdrs);
+
+    my $headers = delete $curl_hdr_hacks{$curl} || [];
+
+    push @$headers,
+        "X-B3-TraceId: " . as_hex($span->{trace_id}),
+        "X-B3-SpanId: "  . as_hex($span->{id});
+
+    push @$headers,
+        "X-B3-ParentSpanId: " . as_hex($span->{parent_id})
+        if exists $span->{parent_id};
+
+    $curl->setopt(LOCAL_CURLOPT_HTTPHEADER, $headers);
 }
+
+sub as_hex {
+    Math::BigInt->new(shift)->as_hex;
+}
+
 sub curlm_add_handle_pre {
     my $span = shift;
     my $args = shift;
     my $curlm = $args->[0];
-    my $curl = $args->[1];
+    my $curl  = $args->[1];
+
     my $id = $curl->getinfo(LOCAL_CURLINFO_PRIVATE);
-    $curlm_handles{$curlm}->{$id} = { curl => $curl, span => $span };
+    $curlm_handles{$curlm}{$id} = { curl => $curl, span => $span };
 
     # Add cross-service tracing headers
-    eval { curl_header_fixup($curl, $span); };
-    return;
+    eval { curl_header_fixup($curl, $span) };
 }
+
 sub curl_pre {
     my $span = shift;
     my $args = shift;
     my $curl = $args->[0];
 
     # Add cross-service tracing headers
-    eval { curl_header_fixup($curl, $span); };
-    return;
+    eval { curl_header_fixup($curl, $span) };
 }
+
 sub curl_post {
     my $span = shift;
     my $args = shift;
     my $curl = $args->[0];
-    my $url = $curl->getinfo(LOCAL_CURLINFO_EFFECTIVE_URL);
-    my $hostname = undef;
+
+    my $code = $curl->getinfo(LOCAL_CURLINFO_HTTP_CODE);
+    my $url  = $curl->getinfo(LOCAL_CURLINFO_EFFECTIVE_URL);
+    my $hostname;
+
     eval {
         my $u = URI->new($url);
-        $hostname = $u->host();
-        $url = $u->path();
+        $hostname = $u->host;
+        $url = $u->path;
     };
-    my $code = $curl->getinfo(LOCAL_CURLINFO_HTTP_CODE);
-    my @bins = ( { key => "http.uri", value => $url },
-               { key => "http.status", value => $code } );
+
+    my @bins = (
+        { key => "http.uri",    value => $url },
+        { key => "http.status", value => $code },
+    );
+
     push @bins, { key => "http.hostname", value => $hostname }
-        if(defined($hostname));
+        if $hostname;
+
     return @bins;
 }
+
 sub dbi_namer {
     my $method = shift;
+
     return sub {
-        my $dbi_genh = shift;
-        my $db = undef;
-        $db = $dbi_genh if(ref($dbi_genh) eq 'DBI::db');
-        $db = $dbi_genh->{Database} if(ref($dbi_genh) eq 'DBI::st');
-        my $connstr = $db->get_info(2);
+        my $h = shift;
+        $h = $h->{Database} if ref $h eq 'DBI::st';
+
         my $name = $method;
-        if($connstr =~ /^dbi:([^:]+)/i) {
+        my $conn_str = $h->get_info(2);
+
+        if ($conn_str =~ /^dbi:([^:]+)/i) {
             my $dbi_driver = $1;
             $name =~ s/^DBI/DBI($dbi_driver)/;
         }
+
         return $name;
     };
 }
+
 sub dbi_pre {
     my $span = shift;
     my $args = shift;
-    my $dbi_genh = $args->[0];
-    return ( { key => "sql.statement", value => $dbi_genh->{Statement} } );
+    my $h = $args->[0];
+
+    return (
+        { key => "sql.statement", value => $h->{Statement} },
+    );
 }
-sub apache_pre() {
+
+sub apache_pre {
     my $span = shift;
     my $args = shift;
     my $r = $args->[0];
-    return ( { key => "http.hostname", value => $r->hostname() },
-             { key => "http.uri", value => $r->uri() },
-             { key => "http.method", value => $r->method() } );
+
+    return (
+        { key => "http.hostname", value => $r->hostname() },
+        { key => "http.uri",      value => $r->uri() },
+        { key => "http.method",   value => $r->method() },
+    );
 }
 
-sub apache_post() {
+sub apache_post {
     my $span = shift;
     my $args = shift;
     my $r = $args->[0];
-    return ( { key => "http.status", value => $r->status() } );
+
+    return (
+        { key => "http.status", value => $r->status() },
+    );
 }
 
-sub mungo_start_trace() {
-    my $tid = $_[0];
-    my $args = $_[1];
-    return undef if($tid);
+sub mungo_start_trace {
+    my $tid  = shift or return;
+    my $args = shift;
     my $r = $args->[0];
 
-    my $name = $r->uri();
+    my $name = $r->uri;
     my $htid = $r->headers_in->{'x-b3-traceid'} || '';
 
     service_name($ENV{CIRCONUS_TRACER_SERVICE_NAME} || 'mod_perl');
 
     if ($htid =~ TRACE_RE) {
-        new_trace($name, $htid,
-                  $r->headers_in->{'x-b3-parentspanid'},
-                  $r->headers_in->{'x-b3-spanid'});
+        new_trace(
+            $name, $htid,
+            $r->headers_in->{'x-b3-parentspanid'},
+            $r->headers_in->{'x-b3-spanid'},
+        );
     } else {
         new_trace($name);
     }
-    return undef;
 }
 
-sub mungo_end_trace() {
+sub mungo_end_trace {
     finish_trace();
 }
 
